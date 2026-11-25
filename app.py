@@ -86,11 +86,12 @@ def ai_codeformer_restauracija(image, jacina_ai=0.5):
             jacina_ai, # codeformer_fidelity
             fn_index=0
         )
-        if isinstance(result, (list, tuple)):
-            final_path = result
-        else:
-            final_path = result
-        return Image.open(final_path)
+        # Vađenje putanje slike iz rezultata (čak i ako je ugnježdeno u tuple/listu/dict)
+        while isinstance(result, (list, tuple)):
+            result = result[0]
+        if isinstance(result, dict) and "path" in result:
+            result = result["path"]
+        return Image.open(result)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
