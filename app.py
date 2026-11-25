@@ -78,16 +78,16 @@ def ai_codeformer_restauracija(image, jacina_ai=0.5):
     try:
         client = Client("sczhou/CodeFormer")
         result = client.predict(
-            image=handle_file(tmp_path),
-            face_align=True,
-            background_enhance=True,
-            face_upsample=True,
-            upscale=2,
-            codeformer_fidelity=jacina_ai,
-            api_name="/predict"
+            handle_file(tmp_path),
+            True,   # face_align
+            True,   # background_enhance
+            True,   # face_upsample
+            2,      # upscale
+            jacina_ai, # codeformer_fidelity
+            fn_index=0
         )
         if isinstance(result, (list, tuple)):
-            final_path = result[0]
+            final_path = result
         else:
             final_path = result
         return Image.open(final_path)
