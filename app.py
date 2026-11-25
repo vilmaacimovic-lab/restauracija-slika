@@ -15,6 +15,9 @@ st.set_page_config(
     layout="centered"
 )
 
+# Učitavanje Hugging Face tokena iz Streamlit Secrets
+HF_TOKEN = st.secrets.get("HF_TOKEN", None)
+
 # Funkcija za prikaz Adsterra Native Banner reklame
 def prikazi_reklamu():
     ad_code = """
@@ -25,7 +28,7 @@ def prikazi_reklamu():
     """
     components.html(ad_code, height=260, scrolling=False)
 
-# Funkcija za uklanjanje žutog tona (Auto White Balance)
+# Funkcija za uklanjanje žutog tona
 def ukloni_zutilo(img_bgr):
     result = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     avg_a = np.average(result[:, :, 1])
@@ -39,15 +42,12 @@ def brza_restauracija(image, ukloni_sum, neutralisi_zuto, popravi_kontrast, ostr
     img_np = np.array(image.convert("RGB"))
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-    # 1. Neutralisanje žutog tona
     if neutralisi_zuto:
         img_bgr = ukloni_zutilo(img_bgr)
 
-    # 2. Uklanjanje šuma
     if ukloni_sum > 0:
         img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, ukloni_sum * 3, ukloni_sum * 3, 7, 21)
 
-    # 3. Popravljanje kontrasta
     if popravi_kontrast:
         lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
@@ -66,26 +66,27 @@ def brza_restauracija(image, ukloni_sum, neutralisi_zuto, popravi_kontrast, ostr
 
     return pil_img
 
-# Dubinska AI restauracija preko besplatnog Hugging Face GFPGAN modela
-def ai_dubinska_restauracija(image):
+# Prava AI restauracija lica preko CodeFormer modela (sa HF tokenom)
+def ai_codeformer_restauracija(image, jacina_ai=0.7):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
         image.save(tmp.name, format="PNG")
         tmp_path = tmp.name
 
     try:
-        # Povezivanje na javni GFPGAN prostor za rekonstrukciju lica i starih slika
-        client = Client("Xintao/GFPGAN")
-        result_path = client.predict(
-            img=handle_file(tmp_path),
-            version="v1.4",
-            scale=2,
+        client = Client("sczhou/CodeFormer", hf_token=HF_TOKEN)
+        result = client.predict(
+            image=handle_file(tmp_path),
+            face_align=True,
+            background_enhance=True,
+            face_upsample=True,
+            upscale=2,
+            codeformer_fidelity=jacina_ai,
             api_name="/predict"
         )
-        # GFPGAN nekad vraća listu [cropped_faces, restored_img] ili putanju
-        if isinstance(result_path, (list, tuple)):
-            final_path = result_path[-1]
+        if isinstance(result, (list, tuple)):
+            final_path = result[0]
         else:
-            final_path = result_path
+            final_path = result
         return Image.open(final_path)
     finally:
         if os.path.exists(tmp_path):
@@ -93,7 +94,7 @@ def ai_dubinska_restauracija(image):
 
 # --- INTERFEJS APLIKACIJE ---
 st.title("🖼️ AI Restauracija i Obnova Starih Slika")
-st.write("Vratite stari sjaj porodičnim uspomenama – uklonite žutilo, izoštrite lica i obnovite oštećene fotografije.")
+st.write("Vratite stari sjaj porodičnim uspomenama – uklonite žutilo, izoštrite lica i obnovite oštećene fotografije pomoću veštačke inteligencije.")
 
 prikazi_reklamu()
 st.divider()
@@ -105,25 +106,25 @@ if uploaded_file is not None:
 
     mod = st.radio(
         "Izaberite način obnove:",
-        ["✨ Dubinska AI Restauracija Lica (Preporučeno za mutna lica i oštećenja)", "⚡ Brza korekcija boja, kontrasta i žutila"],
+        ["✨ Dubinska AI Restauracija Lica (CodeFormer AI)", "⚡ Brza korekcija boja, kontrasta i žutila"],
         index=0
     )
 
     restored_image = None
 
     if "Dubinska AI" in mod:
-        st.info("AI model analizira lica i detalje na slici. Obrada traje oko 15–30 sekundi.")
+        jacina = st.slider(
+            "Balans AI rekonstrukcije (0.1 = maksimalno crtanje detalja lica, 0.9 = vernije originalu)",
+            0.1, 0.9, 0.5, step=0.1
+        )
         if st.button("🚀 Pokreni AI Restauraciju", type="primary", use_container_width=True):
-            with st.spinner("Veštačka inteligencija rekonstruiše lica i čisti sliku... Sačekajte..."):
+            with st.spinner("CodeFormer AI rekonstruiše lica i povećava rezoluciju... Sačekajte 15–30 sekundi..."):
                 try:
-                    # Prvo uklonimo jako žutilo ako ga ima, pa šaljemo AI modelu
-                    pred_obrada = brza_restauracija(original_image, 1, True, True, 1.0, False)
-                    restored_image = ai_dubinska_restauracija(pred_obrada)
+                    restored_image = ai_codeformer_restauracija(original_image, jacina_ai=jacina)
                     st.session_state["restored"] = restored_image
                 except Exception as e:
-                    st.warning("Besplatni AI server je trenutno preopterećen. Pokrećem naprednu lokalnu obnovu...")
-                    restored_image = brza_restauracija(original_image, 3, True, True, 1.8, False)
-                    st.session_state["restored"] = restored_image
+                    st.error(f"Greška pri povezivanju sa AI serverom: {e}")
+                    st.info("Pokušajte ponovo za minut ili koristite brzu korekciju.")
         if "restored" in st.session_state:
             restored_image = st.session_state["restored"]
     else:
@@ -139,12 +140,12 @@ if uploaded_file is not None:
         restored_image = brza_restauracija(original_image, ukloni_sum, neutralisi_zuto, popravi_kontrast, ostrina, crno_belo)
 
     if restored_image is not None:
-        st.success("✅ Fotografija je obrađena!")
+        st.success("✅ Fotografija je uspešno obnovljena!")
         col1, col2 = st.columns(2)
         with col1:
             st.image(original_image, caption="Pre (Original)", use_container_width=True)
         with col2:
-            st.image(restored_image, caption="Posle (Obnovljena)", use_container_width=True)
+            st.image(restored_image, caption="Posle (AI Obnovljena)", use_container_width=True)
 
         buf = io.BytesIO()
         restored_image.save(buf, format="PNG")
