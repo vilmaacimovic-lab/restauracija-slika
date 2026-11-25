@@ -6,7 +6,6 @@ from PIL import Image, ImageEnhance, ImageOps
 import io
 import tempfile
 import os
-from gradio_client import Client, handle_file
 
 # Podešavanje stranice
 st.set_page_config(
@@ -15,8 +14,12 @@ st.set_page_config(
     layout="centered"
 )
 
-# Učitavanje Hugging Face tokena iz Streamlit Secrets
+# Učitavanje Hugging Face tokena u okruženje pre uvoza gradio_client-a
 HF_TOKEN = st.secrets.get("HF_TOKEN", None)
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+
+from gradio_client import Client, handle_file
 
 # Funkcija za prikaz Adsterra Native Banner reklame
 def prikazi_reklamu():
@@ -66,14 +69,14 @@ def brza_restauracija(image, ukloni_sum, neutralisi_zuto, popravi_kontrast, ostr
 
     return pil_img
 
-# Prava AI restauracija lica preko CodeFormer modela (sa HF tokenom)
-def ai_codeformer_restauracija(image, jacina_ai=0.7):
+# Prava AI restauracija lica preko CodeFormer modela
+def ai_codeformer_restauracija(image, jacina_ai=0.5):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
         image.save(tmp.name, format="PNG")
         tmp_path = tmp.name
 
     try:
-        client = Client("sczhou/CodeFormer", hf_token=HF_TOKEN)
+        client = Client("sczhou/CodeFormer")
         result = client.predict(
             image=handle_file(tmp_path),
             face_align=True,
