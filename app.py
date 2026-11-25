@@ -40,37 +40,38 @@ def ukloni_zutilo(img_bgr):
     result[:, :, 2] = result[:, :, 2] - ((avg_b - 128) * (result[:, :, 0] / 255.0) * 1.1)
     return cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
 
-# Brza lokalna obrada
-def brza_restauracija(image, ukloni_sum, neutralisi_zuto, popravi_kontrast, ostrina, crno_belo):
+# Pred-obrada: uklanja tačkice/mrežicu sa slikanog papira i popravlja kontrast pre AI-ja
+def ocisti_mrezicu_i_pripremi(image, skini_mrezicu=True, skini_zuto=True):
     img_np = np.array(image.convert("RGB"))
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-    if neutralisi_zuto:
+    # Smanjimo ako je slika ogromna (da AI brže i preciznije obradi)
+    h, w = img_bgr.shape[:2]
+    if max(h, w) > 1200:
+        scale = 1200 / max(h, w)
+        img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+    # 1. Uklanjanje mrežaste teksture (moiré efekta sa papira/ekrana)
+    if skini_mrezicu:
+        # Median blur skida tačkice, a bilateral filter pegla šum dok čuva ivice
+        img_bgr = cv2.medianBlur(img_bgr, 3)
+        img_bgr = cv2.bilateralFilter(img_bgr, d=9, sigmaColor=55, sigmaSpace=55)
+
+    # 2. Uklanjanje žutila
+    if skini_zuto:
         img_bgr = ukloni_zutilo(img_bgr)
 
-    if ukloni_sum > 0:
-        img_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, ukloni_sum * 3, ukloni_sum * 3, 7, 21)
+    # 3. Blago podizanje lokalnog kontrasta
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_eq = clahe.apply(l)
+    img_bgr = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
 
-    if popravi_kontrast:
-        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        l_eq = clahe.apply(l)
-        img_bgr = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
+    return Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
 
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb)
-
-    if crno_belo:
-        pil_img = ImageOps.grayscale(pil_img).convert("RGB")
-
-    if ostrina != 1.0:
-        pil_img = ImageEnhance.Sharpness(pil_img).enhance(ostrina)
-
-    return pil_img
-
-# Prava AI restauracija lica preko CodeFormer modela
-def ai_codeformer_restauracija(image, jacina_ai=0.5):
+# Prava AI restauracija preko CodeFormer modela (sa 4x uvećanjem i jakim AI crtanjem)
+def ai_codeformer_restauracija(image, jacina_ai=0.2, uvecanje=4):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
         image.save(tmp.name, format="PNG")
         tmp_path = tmp.name
@@ -79,16 +80,38 @@ def ai_codeformer_restauracija(image, jacina_ai=0.5):
         client = Client("sczhou/CodeFormer")
         result = client.predict(
             handle_file(tmp_path),
-            True,   # face_align
-            True,   # background_enhance
-            True,   # face_upsample
-            2,      # upscale
-            jacina_ai, # codeformer_fidelity
+            True,       # face_align
+            True,       # background_enhance
+            True,       # face_upsample
+            uvecanje,   # upscale (2 ili 4)
+            jacina_ai,  # codeformer_fidelity (niže = jače AI crtanje)
             fn_index=0
         )
-        # Vađenje putanje slike iz rezultata (čak i ako je ugnježdeno u tuple/listu/dict)
         while isinstance(result, (list, tuple)):
-            result = result[0]
+            result = result
+        if isinstance(result, dict) and "path" in result:
+            result = result["path"]
+        return Image.open(result)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+# AI Bojenje crno-belih slika preko DDColor modela
+def ai_oboji_sliku(image):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+        image.save(tmp.name, format="PNG")
+        tmp_path = tmp.name
+
+    try:
+        client = Client("piddnad/DDColor")
+        result = client.predict(
+            img=handle_file(tmp_path),
+            model_size="large",
+            input_size=512,
+            api_name="/predict"
+        )
+        while isinstance(result, (list, tuple)):
+            result = result
         if isinstance(result, dict) and "path" in result:
             result = result["path"]
         return Image.open(result)
@@ -98,7 +121,7 @@ def ai_codeformer_restauracija(image, jacina_ai=0.5):
 
 # --- INTERFEJS APLIKACIJE ---
 st.title("🖼️ AI Restauracija i Obnova Starih Slika")
-st.write("Vratite stari sjaj porodičnim uspomenama – uklonite žutilo, izoštrite lica i obnovite oštećene fotografije pomoću veštačke inteligencije.")
+st.write("Vratite stari sjaj porodičnim uspomenama – uklonite mrežicu sa papira, izoštrite lica u 4K rezoluciji i obojite crno-bele fotografije.")
 
 prikazi_reklamu()
 st.divider()
@@ -109,42 +132,60 @@ if uploaded_file is not None:
     original_image = Image.open(uploaded_file)
 
     mod = st.radio(
-        "Izaberite način obnove:",
-        ["✨ Dubinska AI Restauracija Lica (CodeFormer AI)", "⚡ Brza korekcija boja, kontrasta i žutila"],
+        "Izaberite alat za obnovu:",
+        [
+            "✨ Dubinska AI Restauracija + Uklanjanje mrežice sa papira (4x HD)",
+            "🎨 AI Kolorizacija (Bojenje crno-belih starih slika)",
+            "⚡ Brzo čišćenje i uklanjanje žutila (bez AI čekanja)"
+        ],
         index=0
     )
 
     restored_image = None
 
     if "Dubinska AI" in mod:
-        jacina = st.slider(
-            "Balans AI rekonstrukcije (0.1 = maksimalno crtanje detalja lica, 0.9 = vernije originalu)",
-            0.1, 0.9, 0.5, step=0.1
-        )
-        if st.button("🚀 Pokreni AI Restauraciju", type="primary", use_container_width=True):
-            with st.spinner("CodeFormer AI rekonstruiše lica i povećava rezoluciju... Sačekajte 15–30 sekundi..."):
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            skini_mrezicu = st.checkbox("Ukloni tačkice/mrežicu sa papira (Preporučeno)", value=True)
+            skini_zuto = st.checkbox("Neutrališi žuti/izbledeli ton", value=True)
+        with col_opt2:
+            jacina = st.slider("Jačina AI crtanja (0.1 = najjače, 0.8 = blaže)", 0.1, 0.8, 0.2, step=0.1)
+            uvecanje = st.selectbox("Uvećanje rezolucije", [2, 4], index=1)
+
+        if st.button("🚀 Pokreni Pun AI Tretman", type="primary", use_container_width=True):
+            with st.spinner("1/2 Čistim mrežicu sa papira... 2/2 AI rekonstruiše lica i detalje (20–40s)..."):
                 try:
-                    restored_image = ai_codeformer_restauracija(original_image, jacina_ai=jacina)
-                    st.session_state["restored"] = restored_image
+                    pripremljena = ocisti_mrezicu_i_pripremi(original_image, skini_mrezicu, skini_zuto)
+                    ai_rezultat = ai_codeformer_restauracija(pripremljena, jacina_ai=jacina, uvecanje=uvecanje)
+                    # Finalno blago izoštravanje
+                    ai_rezultat = ImageEnhance.Sharpness(ai_rezultat).enhance(1.25)
+                    st.session_state["restored"] = ai_rezultat
                 except Exception as e:
-                    st.error(f"Greška pri povezivanju sa AI serverom: {e}")
-                    st.info("Pokušajte ponovo za minut ili koristite brzu korekciju.")
+                    st.error(f"AI server je trenutno zauzet: {e}")
+
         if "restored" in st.session_state:
             restored_image = st.session_state["restored"]
-    else:
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            ukloni_sum = st.slider("Čišćenje šuma i mrlja", 0, 5, 2)
-            ostrina = st.slider("Izoštravanje detalja", 0.5, 3.0, 1.6, step=0.1)
-        with col_s2:
-            neutralisi_zuto = st.checkbox("Ukloni žuti/stari ton sa slike", value=True)
-            popravi_kontrast = st.checkbox("Popravi izbledeli kontrast", value=True)
-            crno_belo = st.checkbox("Prebaci u čistu crno-belu sliku", value=False)
 
-        restored_image = brza_restauracija(original_image, ukloni_sum, neutralisi_zuto, popravi_kontrast, ostrina, crno_belo)
+    elif "Kolorizacija" in mod:
+        st.info("Pretvara stare crno-bele fotografije u prirodne fotografije u boji.")
+        if st.button("🎨 Oboji fotografiju pomoću AI-ja", type="primary", use_container_width=True):
+            with st.spinner("AI dodaje prirodne boje fotografiji... Sačekajte 15–30 sekundi..."):
+                try:
+                    pripremljena = ocisti_mrezicu_i_pripremi(original_image, True, False)
+                    obojena = ai_oboji_sliku(pripremljena)
+                    st.session_state["restored"] = obojena
+                except Exception as e:
+                    st.error(f"Greška sa serverom za bojenje: {e}")
+
+        if "restored" in st.session_state:
+            restored_image = st.session_state["restored"]
+
+    else:
+        pripremljena = ocisti_mrezicu_i_pripremi(original_image, True, True)
+        restored_image = ImageEnhance.Sharpness(pripremljena).enhance(1.5)
 
     if restored_image is not None:
-        st.success("✅ Fotografija je uspešno obnovljena!")
+        st.success("✅ Fotografija je uspešno obrađena!")
         col1, col2 = st.columns(2)
         with col1:
             st.image(original_image, caption="Pre (Original)", use_container_width=True)
